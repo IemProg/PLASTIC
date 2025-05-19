@@ -18,7 +18,7 @@
     <a href='https://enzotarta.github.io/' target='_blank'>Enzo Tartaglione</a><sup>1</sup>&emsp;
 </div>
 <div>
-<sup>1</sup>Telecom-Paris, Institut Polytechnique de Paris&emsp;
+<sup>1</sup>Télécom-Paris, Institut Polytechnique de Paris, France &emsp;
 <sup>2</sup>University of Bergamo, Italy&emsp;
 <sup>3</sup>Inria at University Grenoble Alpes, France&emsp;
 </div>
