@@ -25,7 +25,7 @@
 </div>
 
 
-The code repository for "[Enhancing Plasticity for First Session Adaptation Continual Learning](https://arxiv.org/abs/2312.08977)" in PyTorch.
+The code repository for "[Enhancing Plasticity for First Session Adaptation Continual Learning](https://arxiv.org/abs/2310.11482)" in PyTorch.
 
 📣 Accepted as a conference paper at CoLLAs 2025
 
