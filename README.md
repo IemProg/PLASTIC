@@ -14,7 +14,7 @@
 <div>
     <a href='https://iemprog.github.io/' target='_blank'>Imad Eddine MAROUF</a><sup>1</sup>&emsp;
     <a href='https://scholar.google.it/citations?user=YfzgrDYAAAAJ&hl=en' target='_blank'>Subhankar Roy</a><sup>2</sup>&emsp;
-    <a href='https://stelat.eu/' target='_blank'>Stéphane Lathuilière</a><sup>3</sup>
+    <a href='https://stelat.eu/' target='_blank'>Stéphane Lathuilière</a><sup>1,3</sup>
     <a href='https://enzotarta.github.io/' target='_blank'>Enzo Tartaglione</a><sup>1</sup>&emsp;
 </div>
 <div>
