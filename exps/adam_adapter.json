@@ -6,7 +6,7 @@
     "fixed_memory": false,
     "shuffle": true,
     "init_cls": 10,
-    "increment": 10,
+    "increment": 0,
     "model_name": "adam_adapter",
     "convnet_type": "pretrained_vit_b16_224_in21k_adapter",
     "device": ["0"],
@@ -14,12 +14,15 @@
     
     "tuned_epoch":20,
     "init_lr":0.01,
-    "batch_size":48,
+    "batch_size":256,
     "weight_decay":0.0005,
     "min_lr":0,
     "ffn_num":64,
     "optimizer":"sgd",
     "vpt_type":"shallow",
-    "prompt_token_num":5
+    "prompt_token_num":5,
+
+    "num_workers": 4,
+    "pin-mem": true
 }
 

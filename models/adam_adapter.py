@@ -10,6 +10,9 @@ from torch.utils.data import DataLoader
 from utils.inc_net import IncrementalNet,SimpleCosineIncrementalNet,MultiBranchCosineIncrementalNet,SimpleVitNet
 from models.base import BaseLearner
 from utils.toolkit import target2onehot, tensor2numpy
+import timeit
+
+import wandb
 
 # tune the model at first session with adapter, and then conduct simplecil.
 num_workers = 8
@@ -34,9 +37,12 @@ class Learner(BaseLearner):
         self.args=args
 
     def after_task(self):
-        self._known_classes = self._total_classes
+        if self.args["dataset"] == "5datasets":
+            self._known_classes = 0
+        else:
+            self._known_classes = self._total_classes
     
-    def replace_fc(self,trainloader, model, args):
+    def replace_fc(self, trainloader, model, args):
         # replace fc.weight with the embedding average of train data
         model = model.eval()
         embedding_list = []
@@ -47,7 +53,7 @@ class Learner(BaseLearner):
                 (_,data,label)=batch
                 data=data.cuda()
                 label=label.cuda()
-                embedding = model(data)['features']
+                embedding = model(data)["features"]
                 embedding_list.append(embedding.cpu())
                 label_list.append(label.cpu())
         embedding_list = torch.cat(embedding_list, dim=0)
@@ -71,15 +77,23 @@ class Learner(BaseLearner):
         self._network.update_fc(self._total_classes)
         logging.info("Learning on {}-{}".format(self._known_classes, self._total_classes))
 
-        train_dataset = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes),source="train", mode="train", )
+        train_dataset = data_manager.get_dataset(np.arange(self._known_classes, self._total_classes),
+                                                 source="train", mode="train",
+                                                 subset=self.args["subset"], ratio=self.args["subset_per"])
         self.train_dataset=train_dataset
         self.data_manager=data_manager
-        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=num_workers)
+        self.train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True,
+                                       num_workers=num_workers)
 
-        test_dataset = data_manager.get_dataset(np.arange(0, self._total_classes), source="test", mode="test" )
-        self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False, num_workers=num_workers)
+        test_dataset = data_manager.get_dataset(np.arange(0, self._total_classes),
+                                                source="test", mode="test",
+                                                subset=False)
+        self.test_loader = DataLoader(test_dataset, batch_size=self.batch_size, shuffle=False,
+                                      num_workers=num_workers)
 
-        train_dataset_for_protonet=data_manager.get_dataset(np.arange(self._known_classes, self._total_classes),source="train", mode="test", )
+        train_dataset_for_protonet=data_manager.get_dataset(np.arange(self._known_classes, self._total_classes),
+                                                            source="train", mode="test",
+                                                            subset=self.args["subset"], ratio=self.args["subset_per"])
         self.train_loader_for_protonet = DataLoader(train_dataset_for_protonet, batch_size=self.batch_size, shuffle=True, num_workers=num_workers)
 
         if len(self._multiple_gpus) > 1:
@@ -90,9 +104,20 @@ class Learner(BaseLearner):
             self._network = self._network.module
 
     def _train(self, train_loader, test_loader, train_loader_for_protonet):
-        
         self._network.to(self._device)
-        
+        if self.args['optimizer'] == 'sgd':
+            optimizer = optim.SGD(self._network.parameters(), momentum=0.9, lr=self.init_lr,
+                                  weight_decay=self.weight_decay)
+        elif self.args['optimizer'] == 'adam':
+            optimizer = optim.AdamW(self._network.parameters(), lr=self.init_lr,
+                                    weight_decay=self.weight_decay)
+        elif self.args['optimizer'] == 'asam':
+            from sam import SAM
+
+            base_optimizer = torch.optim.SGD  # define an optimizer for the "sharpness-aware" update
+            optimizer = SAM(self._network.parameters(), base_optimizer, lr=self.init_lr, momentum=0.9,
+                            weight_decay=self.weight_decay)
+
         if self._cur_task == 0:
             # show total parameters and trainable parameters
             total_params = sum(p.numel() for p in self._network.parameters())
@@ -108,6 +133,12 @@ class Learner(BaseLearner):
                 optimizer = optim.SGD(self._network.parameters(), momentum=0.9, lr=self.init_lr,weight_decay=self.weight_decay)
             elif self.args['optimizer']=='adam':
                 optimizer=optim.AdamW(self._network.parameters(), lr=self.init_lr, weight_decay=self.weight_decay)
+            elif self.args['optimizer'] == 'asam' or self.args['optimizer'] == 'sam':
+                from sam import SAM
+
+                base_optimizer = torch.optim.SGD  # define an optimizer for the "sharpness-aware" update
+                optimizer = SAM(self._network.parameters(), base_optimizer, lr=self.init_lr, momentum=0.9,
+                                             weight_decay=self.weight_decay)
             scheduler=optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.args['tuned_epoch'], eta_min=self.min_lr)
             self._init_train(train_loader, test_loader, optimizer, scheduler)
             self.construct_dual_branch_network()
@@ -131,20 +162,47 @@ class Learner(BaseLearner):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 logits = self._network(inputs)["logits"]
 
-                loss = F.cross_entropy(logits, targets)
                 optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+
+                if self.args['optimizer'] == 'asam' or self.args['optimizer'] == 'sam':
+                    # first forward-backward pass
+                    loss = F.cross_entropy(logits, targets)
+                    loss.backward()
+                    # optimizer.step()
+                    optimizer.first_step(zero_grad=True)  # using SAM
+
+                    # second forward-backward pass
+                    logits = self._network(inputs)["logits"]
+                    loss = F.cross_entropy(logits, targets)  # make sure to do a full forward pass
+                    loss.backward()
+                    optimizer.second_step(zero_grad=True)
+
+                elif self.args["optimizer"] == "ewc":
+                    pass
+
+                else:
+                    loss = F.cross_entropy(logits, targets)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+
                 losses += loss.item()
 
                 _, preds = torch.max(logits, dim=1)
                 correct += preds.eq(targets.expand_as(preds)).cpu().sum()
                 total += len(targets)
 
+            wandb.log({"training loss": losses})
+
             scheduler.step()
             train_acc = np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 
+            wandb.log({"Training Accuracy": train_acc})
+
             test_acc = self._compute_accuracy(self._network, test_loader)
+
+            wandb.log({"Test Accuracy": test_acc})
+
             info = "Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}".format(
                 self._cur_task,
                 epoch + 1,
@@ -157,6 +215,48 @@ class Learner(BaseLearner):
 
         logging.info(info)
 
-    
+    def computer_FLOPS(self):
+        from ptflops import get_model_complexity_info
+        import re
 
+        with torch.cuda.device(0):
+            # Model thats already available
+            net = self._network.convnet
+            macs, params_ = get_model_complexity_info(net, (3, 224, 224), as_strings=True,
+                                                      print_per_layer_stat=False, verbose=True)
+            # Extract the numerical value
+            flops = eval(re.findall(r'([\d.]+)', macs)[0]) * 2
+            # Extract the unit
+            flops_unit = re.findall(r'([A-Za-z]+)', macs)[0][0]
+
+            print('Computational complexity: {:<8}'.format(macs))
+            print('Computational complexity: {} {}Flops'.format(flops, flops_unit))
+            print('Number of parameters: {:<8}'.format(params_))
+            wandb.log({"FLOPS": flops})
+
+    def profile(self):
+        inputs = torch.randn(self.batch_size, 3, 224, 224)
+        from torch.profiler import profile, record_function, ProfilerActivity
+        with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+            with record_function("model_inference"):
+                self._network.convnet.cuda()
+                self._network.convnet(inputs.cuda())
+
+        print(prof.key_averages().table(sort_by="cuda_time_total"))
+        cuda_time = prof.key_averages().table(sort_by="cuda_time_total")[8939:]
+        wandb.log({"Time(CUDA)": cuda_time[22:-3]})
+    
+    def evaluate_adapt_inference(self):
+        loader = self.test_loader
+        _, inputs, targets = next(iter(loader))
+
+        times = []
+        for i in range(5):
+            start = timeit.default_timer()
+            self._network.convnet(inputs.cuda())
+            stop = timeit.default_timer()
+            t = stop - start
+            times.append(t)
+        t = np.array(times).mean()
+        return wandb.log({"Execution time per TTA": t})
 

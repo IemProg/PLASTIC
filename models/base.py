@@ -55,7 +55,7 @@ class BaseLearner(object):
             self._reduce_exemplar(data_manager, per_class)
             self._construct_exemplar(data_manager, per_class)
 
-    def tsne(self,showcenters=False,Normalize=False):
+    def tsne(self, showcenters=False,Normalize=False):
         import umap
         import matplotlib.pyplot as plt
         print('now draw tsne results of extracted features.')
@@ -87,14 +87,20 @@ class BaseLearner(object):
         plt.savefig(str(self.args['model_name'])+str(tot_classes)+'tsne.pdf')
         plt.close()
 
+    def save_checkpoint(self, filename, head_only=False):
+        if hasattr(self._network, 'module'):
+            to_save = self._network.module
+        else:
+            to_save = self._network
 
-    def save_checkpoint(self, filename):
-        self._network.cpu()
+        if head_only:
+            to_save = to_save.fc
+
         save_dict = {
-            "tasks": self._cur_task,
-            "model_state_dict": self._network.state_dict(),
+            'tasks': self._cur_task,
+            'model_state_dict': to_save.state_dict(),
         }
-        torch.save(save_dict, "{}_{}.pkl".format(filename, self._cur_task))
+        torch.save(save_dict, '{}_{}.pth'.format(filename, self._cur_task))
 
     def after_task(self):
         pass
@@ -149,7 +155,8 @@ class BaseLearner(object):
         return np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 
     def _eval_cnn(self, loader):
-        self._network.eval()
+        #self._network.eval()
+        self._network.to(self._device).eval()
         y_pred, y_true = [], []
         for _, (_, inputs, targets) in enumerate(loader):
             inputs = inputs.to(self._device)
@@ -229,6 +236,89 @@ class BaseLearner(object):
             mean = mean / np.linalg.norm(mean)
 
             self._class_means[class_idx, :] = mean
+
+    def _compute_class_mean(self, data_manager, check_diff=False, oracle=False):
+        if hasattr(self, '_class_means') and self._class_means is not None and not check_diff:
+            ori_classes = self._class_means.shape[0]
+            assert ori_classes == self._known_classes
+            new_class_means = np.zeros((self._total_classes, self.feature_dim))
+            new_class_means[:self._known_classes] = self._class_means
+            self._class_means = new_class_means
+            # new_class_cov = np.zeros((self._total_classes, self.feature_dim, self.feature_dim))
+            new_class_cov = torch.zeros((self._total_classes, self.feature_dim, self.feature_dim))
+            new_class_cov[:self._known_classes] = self._class_covs
+            self._class_covs = new_class_cov
+        elif not check_diff:
+            self._class_means = np.zeros((self._total_classes, self.feature_dim))
+            # self._class_covs = np.zeros((self._total_classes, self.feature_dim, self.feature_dim))
+            self._class_covs = torch.zeros((self._total_classes, self.feature_dim, self.feature_dim))
+
+            # self._class_covs = []
+
+        if check_diff:
+            for class_idx in range(0, self._known_classes):
+                data, targets, idx_dataset = data_manager.get_dataset(np.arange(class_idx, class_idx + 1),
+                                                                      source='train',
+                                                                      mode='test', ret_data=True)
+                idx_loader = DataLoader(idx_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+                # vectors, _ = self._extract_vectors_aug(idx_loader)
+                vectors, _ = self._extract_vectors(idx_loader)
+                class_mean = np.mean(vectors, axis=0)
+                # class_cov = np.cov(vectors.T)
+                class_cov = torch.cov(torch.tensor(vectors, dtype=torch.float64).T)
+                if check_diff:
+                    log_info = "cls {} sim: {}".format(class_idx, torch.cosine_similarity(
+                        torch.tensor(self._class_means[class_idx, :]).unsqueeze(0),
+                        torch.tensor(class_mean).unsqueeze(0)).item())
+                    logging.info(log_info)
+                    np.save('task_{}_cls_{}_mean.npy'.format(self._cur_task, class_idx), class_mean)
+                    # print(class_idx, torch.cosine_similarity(torch.tensor(self._class_means[class_idx, :]).unsqueeze(0), torch.tensor(class_mean).unsqueeze(0)))
+
+        if oracle:
+            for class_idx in range(0, self._known_classes):
+                data, targets, idx_dataset = data_manager.get_dataset(np.arange(class_idx, class_idx + 1),
+                                                                      source='train',
+                                                                      mode='test', ret_data=True)
+                idx_loader = DataLoader(idx_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+                vectors, _ = self._extract_vectors(idx_loader)
+
+                # vectors = np.concatenate([vectors_aug, vectors])
+
+                class_mean = np.mean(vectors, axis=0)
+                # class_cov = np.cov(vectors.T)
+                class_cov = torch.cov(torch.tensor(vectors, dtype=torch.float64).T) + torch.eye(
+                    class_mean.shape[-1]) * 1e-5
+                self._class_means[class_idx, :] = class_mean
+                self._class_covs[class_idx, ...] = class_cov
+
+        for class_idx in range(self._known_classes, self._total_classes):
+            # data, targets, idx_dataset = data_manager.get_dataset(np.arange(class_idx, class_idx+1), source='train',
+            #                                                       mode='train', ret_data=True)
+            # idx_loader = DataLoader(idx_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+            # vectors_aug, _ = self._extract_vectors_aug(idx_loader)
+
+            data, targets, idx_dataset = data_manager.get_dataset(np.arange(class_idx, class_idx + 1), source='train',
+                                                                  mode='test', ret_data=True)
+            idx_loader = DataLoader(idx_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+            vectors, _ = self._extract_vectors(idx_loader)
+
+            # vectors = np.concatenate([vectors_aug, vectors])
+
+            class_mean = np.mean(vectors, axis=0)
+            # class_cov = np.cov(vectors.T)
+            class_cov = torch.cov(torch.tensor(vectors, dtype=torch.float64).T) + torch.eye(class_mean.shape[-1]) * 1e-4
+            if check_diff:
+                log_info = "cls {} sim: {}".format(class_idx, torch.cosine_similarity(
+                    torch.tensor(self._class_means[class_idx, :]).unsqueeze(0),
+                    torch.tensor(class_mean).unsqueeze(0)).item())
+                logging.info(log_info)
+                np.save('task_{}_cls_{}_mean.npy'.format(self._cur_task, class_idx), class_mean)
+                np.save('task_{}_cls_{}_mean_beforetrain.npy'.format(self._cur_task, class_idx),
+                        self._class_means[class_idx, :])
+                # print(class_idx, torch.cosine_similarity(torch.tensor(self._class_means[class_idx, :]).unsqueeze(0), torch.tensor(class_mean).unsqueeze(0)))
+            self._class_means[class_idx, :] = class_mean
+            self._class_covs[class_idx, ...] = class_cov
+            # self._class_covs.append(class_cov)
 
     def _construct_exemplar(self, data_manager, m):
         logging.info("Constructing exemplars...({} per classes)".format(m))

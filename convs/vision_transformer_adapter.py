@@ -26,8 +26,6 @@ import os
 from collections import OrderedDict
 import torch
 
-
-
 class Adapter(nn.Module):
     def __init__(self,
                  config=None,
@@ -58,9 +56,14 @@ class Adapter(nn.Module):
         self.up_proj = nn.Linear(self.down_size, self.n_embd)
 
         self.dropout = dropout
-        if init_option == "bert":
+
+        self.init_option = init_option
+        self.init_adapters()
+
+    def init_adapters(self):
+        if self.init_option == "bert":
             raise NotImplementedError
-        elif init_option == "lora":
+        elif self.init_option == "lora":
             with torch.no_grad():
                 nn.init.kaiming_uniform_(self.down_proj.weight, a=math.sqrt(5))
                 nn.init.zeros_(self.up_proj.weight)
@@ -161,6 +164,10 @@ class Block(nn.Module):
                                     adapter_scalar=config.ffn_adapter_scalar,
                                     adapter_layernorm_option=config.ffn_adapter_layernorm_option,
                                     )
+
+    def reset_adapters(self):
+        if self.config.ffn_adapt:
+            self.adaptmlp.init_adapters()
 
     def forward(self, x):
         x = x + self.drop_path(self.attn(self.norm1(x)))
@@ -277,6 +284,10 @@ class VisionTransformer(nn.Module):
         if self.num_tokens == 2:
             self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if num_classes > 0 else nn.Identity()
 
+    def reset_adapters(self):
+        for idx, blk in enumerate(self.blocks):
+            blk.reset_adapters()
+
     def forward_features(self, x):
         B = x.shape[0]
         x = self.patch_embed(x)
@@ -314,6 +325,8 @@ class VisionTransformer(nn.Module):
                 return (x + x_dist) / 2
         else:
             x = self.head(x)
+
+        x = {'features': x}
         return x
 
 
@@ -411,8 +424,7 @@ def vit_base_patch16_224_adapter(pretrained=False, **kwargs):
 
 
 
-def vit_base_patch16_224_in21k_adapter(pretrained=False, **kwargs):
-    
+def vit_base_patch16_224_in21k_adapter(pretrained=True, **kwargs):
     model = VisionTransformer(patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
 
@@ -465,4 +477,3 @@ def vit_base_patch16_224_in21k_adapter(pretrained=False, **kwargs):
         else:
             p.requires_grad = False 
     return model
-
